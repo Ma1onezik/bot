@@ -10,10 +10,10 @@ jobs:
     runs-on: windows-latest
     
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     
     - name: Setup Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.12'
     
@@ -21,12 +21,13 @@ jobs:
       run: |
         pip install pyinstaller
         pip install aiogram requests aiohttp-socks
+        pip install pandas openpyxl python-dotenv
     
     - name: Build EXE
       run: pyinstaller --onefile --noconsole bot.py
     
     - name: Upload EXE
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: MozgBot
         path: dist/bot.exe
