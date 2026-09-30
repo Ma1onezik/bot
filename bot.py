@@ -11,11 +11,13 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from main import (
-    fetch_full_analytics, 
-    format_report, 
+    fetch_full_analytics,
+    format_report,
     fetch_weekly_analytics,
     format_weekly_report,
-    authenticate_and_get_org_id, 
+    fetch_waiters_analytics,
+    format_waiters_report,
+    authenticate_and_get_org_id,
     get_access_token,
     refresh_access_token
 )
@@ -27,11 +29,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "8955041911:AAE2-O49ENIhXPuC8-3datH-yyJyuJ2bZMw"
+BOT_TOKEN = "8955041911:AAH89wadY5uuSWVExQ681Vn3-tTaeUEHlno"
 
 # === ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ===
 def init_db():
-    """Создает таблицу пользователей, если ее нет."""
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -51,11 +52,11 @@ def init_db():
     conn.close()
     logger.info("✅ База данных инициализирована")
 
+
 def save_user(user_id, login, password, org_id, refresh_token, access_token):
-    """Сохраняет или обновляет пользователя в БД."""
     password_hash = hashlib.sha256(password.encode()).hexdigest()
     expires_at = datetime.now() + timedelta(hours=1)
-    
+
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -67,8 +68,8 @@ def save_user(user_id, login, password, org_id, refresh_token, access_token):
     conn.close()
     logger.info(f"✅ Пользователь {user_id} сохранен в БД")
 
+
 def get_user(user_id):
-    """Получает данные пользователя из БД."""
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -77,7 +78,7 @@ def get_user(user_id):
     ''', (user_id,))
     row = cursor.fetchone()
     conn.close()
-    
+
     if row:
         return {
             "login": row[0],
@@ -89,8 +90,8 @@ def get_user(user_id):
         }
     return None
 
+
 def update_access_token(user_id, new_token):
-    """Обновляет access_token в БД."""
     expires_at = datetime.now() + timedelta(hours=1)
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
@@ -102,7 +103,7 @@ def update_access_token(user_id, new_token):
     conn.close()
     logger.info(f"✅ Access token обновлен для пользователя {user_id}")
 
-# Инициализируем БД
+
 init_db()
 
 # === НАСТРОЙКА БОТА ===
@@ -111,50 +112,58 @@ session = AiohttpSession(timeout=30)
 bot = Bot(token=BOT_TOKEN, session=session)
 dp = Dispatcher(storage=storage)
 
-# === Класс состояний ===
+
 class RegistrationStates(StatesGroup):
     waiting_for_login = State()
     waiting_for_password = State()
 
-# === Кэш пользователей ===
+
 user_cache = {}
 
-# === КЛАВИАТУРЫ ===
+
 def get_main_keyboard():
     keyboard = [
         [KeyboardButton(text="📊 Отчет за сегодня")],
         [KeyboardButton(text="📈 Отчет за неделю")],
+        [KeyboardButton(text="👨‍🍳 Сотрудники")],
         [KeyboardButton(text="🔄 Сменить аккаунт")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
+
+def get_waiters_keyboard():
+    keyboard = [
+        [KeyboardButton(text="👨‍🍳 Сотрудники за сегодня")],
+        [KeyboardButton(text="👨‍🍳 Сотрудники за неделю")],
+        [KeyboardButton(text="⬅️ Назад")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+
 async def ping_user(message: Message, text: str, emoji: str = "⏳"):
-    """Отправляет пользователю уведомление о действии."""
     await message.answer(f"{emoji} {text}")
 
+
 async def get_user_data(user_id):
-    """Получает данные пользователя из кэша или БД."""
     if user_id in user_cache:
         return user_cache[user_id]
-    
+
     user_data = get_user(user_id)
     if user_data:
         user_cache[user_id] = user_data
     return user_data
 
+
 def is_token_valid(user_data):
-    """Проверяет, истек ли access_token."""
     if not user_data or not user_data.get("token_expires_at"):
         return False
     return user_data["token_expires_at"] > datetime.now()
 
+
 async def refresh_user_token(user_id, user_data):
-    """Обновляет токен пользователя."""
     logger.info(f"🔄 Токен для {user_id} истек, обновляем...")
-    
+
     try:
-        # Пытаемся обновить через refresh_token
         if user_data.get("refresh_token"):
             try:
                 new_token = refresh_access_token(user_data["refresh_token"])
@@ -165,8 +174,7 @@ async def refresh_user_token(user_id, user_data):
                 return True
             except Exception as e:
                 logger.warning(f"⚠️ Не удалось обновить через refresh_token: {e}")
-        
-        # Если refresh_token не работает, используем пароль
+
         if user_data.get("password"):
             new_token = get_access_token(user_data["login"], user_data["password"])
             update_access_token(user_id, new_token)
@@ -174,26 +182,58 @@ async def refresh_user_token(user_id, user_data):
             user_cache[user_id] = user_data
             logger.info(f"✅ Токен обновлен через пароль для {user_id}")
             return True
-        
+
         logger.error(f"❌ Нет способа обновить токен для {user_id}")
         return False
-        
+
     except Exception as e:
         logger.error(f"❌ Ошибка обновления токена для {user_id}: {e}")
         return False
 
-# === ОБРАБОТЧИКИ КОМАНД ===
+
+async def ensure_token(message: Message, user_id: int):
+    """Возвращает user_data с валидным токеном или None (и пишет ошибку)."""
+    user_data = await get_user_data(user_id)
+    if not user_data:
+        await message.answer(
+            "❌ **Вы не авторизованы.**\n"
+            "Отправьте /start для входа."
+        )
+        return None
+
+    if not is_token_valid(user_data):
+        await ping_user(message, "Токен истек, обновляю...", "🔄")
+        success = await refresh_user_token(user_id, user_data)
+        if not success:
+            await message.answer(
+                "❌ **Ошибка обновления токена.**\n"
+                "Пожалуйста, выполните повторную регистрацию через /start"
+            )
+            return None
+        user_data = await get_user_data(user_id)
+
+    return user_data
+
+
+async def send_long_message(message: Message, text: str):
+    if len(text) > 4000:
+        parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
+        for part in parts:
+            await message.answer(part, parse_mode="Markdown")
+    else:
+        await message.answer(text, parse_mode="Markdown")
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    """Обработка команды /start."""
     user_id = message.from_user.id
     username = message.from_user.username or "без username"
-    
+
     logger.info(f"📩 Команда /start от {user_id} (@{username})")
     await ping_user(message, "Запускаю бота...", "🚀")
-    
+
     user_data = await get_user_data(user_id)
-    
+
     if user_data:
         logger.info(f"✅ Пользователь {user_id} уже зарегистрирован")
         await message.answer(
@@ -205,7 +245,7 @@ async def cmd_start(message: Message, state: FSMContext):
             parse_mode="Markdown"
         )
         return
-    
+
     await message.answer(
         "🔐 **Для начала работы необходимо авторизоваться в Mozg.**\n\n"
         "Пожалуйста, введите ваш **логин (email)** от аккаунта Mozg:",
@@ -214,21 +254,21 @@ async def cmd_start(message: Message, state: FSMContext):
     )
     await state.set_state(RegistrationStates.waiting_for_login)
 
+
 @dp.message(RegistrationStates.waiting_for_login)
 async def process_login(message: Message, state: FSMContext):
-    """Обработка введенного логина."""
     user_id = message.from_user.id
     login = message.text.strip()
-    
+
     logger.info(f"📩 Пользователь {user_id} ввел логин: {login}")
     await ping_user(message, "Проверяю логин...", "🔍")
-    
+
     if "@" not in login or "." not in login:
         await message.answer(
             "❌ Похоже, это не email. Пожалуйста, введите корректный email:"
         )
         return
-    
+
     await state.update_data(login=login)
     await message.answer(
         "✅ **Логин принят!**\n\n"
@@ -237,24 +277,24 @@ async def process_login(message: Message, state: FSMContext):
     )
     await state.set_state(RegistrationStates.waiting_for_password)
 
+
 @dp.message(RegistrationStates.waiting_for_password)
 async def process_password(message: Message, state: FSMContext):
-    """Обработка введенного пароля и попытка авторизации."""
     user_id = message.from_user.id
     password = message.text.strip()
     user_data = await state.get_data()
     login = user_data.get("login")
-    
+
     logger.info(f"📩 Пользователь {user_id} ввел пароль (попытка авторизации)")
     await ping_user(message, "Проверяю данные и подключаюсь к Mozg...", "⏳")
-    
+
     try:
         org_id, token, refresh_token = authenticate_and_get_org_id(login, password)
-        
+
         logger.info(f"✅ Пользователь {user_id} успешно авторизован. Org ID: {org_id}")
-        
+
         save_user(user_id, login, password, org_id, refresh_token, token)
-        
+
         user_cache[user_id] = {
             "login": login,
             "password": password,
@@ -264,7 +304,7 @@ async def process_password(message: Message, state: FSMContext):
             "refresh_token": refresh_token,
             "token_expires_at": datetime.now() + timedelta(hours=1)
         }
-        
+
         await state.clear()
         await message.answer(
             f"✅ **Авторизация успешна!**\n\n"
@@ -275,9 +315,9 @@ async def process_password(message: Message, state: FSMContext):
             reply_markup=get_main_keyboard(),
             parse_mode="Markdown"
         )
-        
+
         logger.info(f"✅ Пользователь {user_id} завершил регистрацию")
-        
+
     except Exception as e:
         logger.error(f"❌ Ошибка авторизации для {user_id}: {e}")
         await message.answer(
@@ -289,38 +329,19 @@ async def process_password(message: Message, state: FSMContext):
         )
         await state.clear()
 
+
 @dp.message(F.text == "📊 Отчет за сегодня")
 async def send_report(message: Message):
-    """Отправка отчета за актуальную дату."""
     user_id = message.from_user.id
     username = message.from_user.username or "без username"
-    
+
     logger.info(f"📩 Запрос ежедневного отчета от {user_id} (@{username})")
-    await ping_user(message, "Начинаю сбор данных за сегодня...", "📊")
-    
-    user_data = await get_user_data(user_id)
+    await ping_user(message, "Собираю данные из Mozg…", "⏳")
+
+    user_data = await ensure_token(message, user_id)
     if not user_data:
-        logger.warning(f"⚠️ Пользователь {user_id} не авторизован")
-        await message.answer(
-            "❌ **Вы не авторизованы.**\n"
-            "Отправьте /start для входа."
-        )
         return
-    
-    # Проверяем и обновляем токен
-    if not is_token_valid(user_data):
-        await ping_user(message, "Токен истек, обновляю...", "🔄")
-        success = await refresh_user_token(user_id, user_data)
-        if not success:
-            await message.answer(
-                "❌ **Ошибка обновления токена.**\n"
-                "Пожалуйста, выполните повторную регистрацию через /start"
-            )
-            return
-        user_data = await get_user_data(user_id)
-    
-    await ping_user(message, "Получаю данные из Mozg...", "⏳")
-    
+
     try:
         analytics = fetch_full_analytics(
             login=user_data["login"],
@@ -328,58 +349,28 @@ async def send_report(message: Message):
             org_id=user_data["org_id"],
             token=user_data["access_token"]
         )
-        
         report_text = format_report(analytics)
-        
         logger.info(f"✅ Ежедневный отчет получен для {user_id} ({len(report_text)} символов)")
-        
-        await ping_user(message, "Отчет готов! Отправляю...", "📨")
-        
-        if len(report_text) > 4000:
-            parts = [report_text[i:i+4000] for i in range(0, len(report_text), 4000)]
-            for part in parts:
-                await message.answer(part, parse_mode="Markdown")
-        else:
-            await message.answer(report_text, parse_mode="Markdown")
-        
+        await send_long_message(message, report_text)
         await ping_user(message, "Отчет успешно доставлен! ✅", "✅")
-        
+
     except Exception as e:
         logger.error(f"❌ Ошибка при получении данных для {user_id}: {e}")
         await message.answer(f"❌ **Ошибка при получении данных:**\n```\n{str(e)}\n```", parse_mode="Markdown")
 
+
 @dp.message(F.text == "📈 Отчет за неделю")
 async def send_week_report(message: Message):
-    """Отправка отчета за последние 7 дней в сравнении с прошлым годом."""
     user_id = message.from_user.id
     username = message.from_user.username or "без username"
-    
+
     logger.info(f"📩 Запрос недельного отчета от {user_id} (@{username})")
-    await ping_user(message, "Начинаю сбор данных за неделю...", "📊")
-    
-    user_data = await get_user_data(user_id)
+    await ping_user(message, "Собираю данные из Mozg…", "⏳")
+
+    user_data = await ensure_token(message, user_id)
     if not user_data:
-        logger.warning(f"⚠️ Пользователь {user_id} не авторизован")
-        await message.answer(
-            "❌ **Вы не авторизованы.**\n"
-            "Отправьте /start для входа."
-        )
         return
-    
-    # Проверяем и обновляем токен
-    if not is_token_valid(user_data):
-        await ping_user(message, "Токен истек, обновляю...", "🔄")
-        success = await refresh_user_token(user_id, user_data)
-        if not success:
-            await message.answer(
-                "❌ **Ошибка обновления токена.**\n"
-                "Пожалуйста, выполните повторную регистрацию через /start"
-            )
-            return
-        user_data = await get_user_data(user_id)
-    
-    await ping_user(message, "Получаю данные из Mozg...", "⏳")
-    
+
     try:
         analytics = fetch_weekly_analytics(
             login=user_data["login"],
@@ -387,38 +378,103 @@ async def send_week_report(message: Message):
             org_id=user_data["org_id"],
             token=user_data["access_token"]
         )
-        
         report_text = format_weekly_report(analytics)
-        
         logger.info(f"✅ Недельный отчет получен для {user_id} ({len(report_text)} символов)")
-        
-        await ping_user(message, "Отчет готов! Отправляю...", "📨")
-        
-        if len(report_text) > 4000:
-            parts = [report_text[i:i+4000] for i in range(0, len(report_text), 4000)]
-            for part in parts:
-                await message.answer(part, parse_mode="Markdown")
-        else:
-            await message.answer(report_text, parse_mode="Markdown")
-        
+        await send_long_message(message, report_text)
         await ping_user(message, "Отчет успешно доставлен! ✅", "✅")
-        
+
     except Exception as e:
         logger.error(f"❌ Ошибка при получении недельных данных для {user_id}: {e}")
         await message.answer(f"❌ **Ошибка при получении данных:**\n```\n{str(e)}\n```", parse_mode="Markdown")
 
+
+# === ОТДЕЛЬНАЯ ВЕТКА ПО СОТРУДНИКАМ ===
+@dp.message(F.text == "👨‍🍳 Сотрудники")
+async def open_waiters_menu(message: Message):
+    user_id = message.from_user.id
+    logger.info(f"👨‍🍳 Открытие меню сотрудников для {user_id}")
+
+    await message.answer(
+        "👨‍🍳 **Раздел «Сотрудники»**\n\n"
+        "Выберите период:",
+        reply_markup=get_waiters_keyboard(),
+        parse_mode="Markdown"
+    )
+
+
+@dp.message(F.text == "⬅️ Назад")
+async def back_to_main(message: Message):
+    await message.answer(
+        "Возвращаюсь в главное меню.",
+        reply_markup=get_main_keyboard()
+    )
+
+
+@dp.message(F.text == "👨‍🍳 Сотрудники за сегодня")
+async def send_waiters_today(message: Message):
+    user_id = message.from_user.id
+    logger.info(f"👨‍🍳 Запрос сотрудников за сегодня от {user_id}")
+    await ping_user(message, "Собираю данные по сотрудникам…", "⏳")
+
+    user_data = await ensure_token(message, user_id)
+    if not user_data:
+        return
+
+    try:
+        analytics = fetch_waiters_analytics(
+            login=user_data["login"],
+            password=user_data.get("password", ""),
+            org_id=user_data["org_id"],
+            token=user_data["access_token"],
+            period="today"
+        )
+        report_text = format_waiters_report(analytics)
+        await send_long_message(message, report_text)
+        await ping_user(message, "Готово! ✅", "✅")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка сотрудников (today) для {user_id}: {e}")
+        await message.answer(f"❌ **Ошибка:**\n```\n{str(e)}\n```", parse_mode="Markdown")
+
+
+@dp.message(F.text == "👨‍🍳 Сотрудники за неделю")
+async def send_waiters_week(message: Message):
+    user_id = message.from_user.id
+    logger.info(f"👨‍🍳 Запрос сотрудников за неделю от {user_id}")
+    await ping_user(message, "Собираю данные по сотрудникам…", "⏳")
+
+    user_data = await ensure_token(message, user_id)
+    if not user_data:
+        return
+
+    try:
+        analytics = fetch_waiters_analytics(
+            login=user_data["login"],
+            password=user_data.get("password", ""),
+            org_id=user_data["org_id"],
+            token=user_data["access_token"],
+            period="week"
+        )
+        report_text = format_waiters_report(analytics)
+        await send_long_message(message, report_text)
+        await ping_user(message, "Готово! ✅", "✅")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка сотрудников (week) для {user_id}: {e}")
+        await message.answer(f"❌ **Ошибка:**\n```\n{str(e)}\n```", parse_mode="Markdown")
+
+
 @dp.message(F.text == "🔄 Сменить аккаунт")
 async def switch_account(message: Message, state: FSMContext):
-    """Смена аккаунта."""
     user_id = message.from_user.id
     username = message.from_user.username or "без username"
-    
+
     logger.info(f"🔄 Смена аккаунта для {user_id} (@{username})")
     await ping_user(message, "Сбрасываю сессию...", "🔄")
-    
+
     if user_id in user_cache:
         del user_cache[user_id]
-    
+
     await message.answer(
         "🔄 **Сессия сброшена.**\n\n"
         "Введите ваш логин (email) от Mozg для повторной регистрации:",
@@ -426,15 +482,15 @@ async def switch_account(message: Message, state: FSMContext):
         parse_mode="Markdown"
     )
     await state.set_state(RegistrationStates.waiting_for_login)
-    
+
     logger.info(f"✅ Сессия сброшена для {user_id}")
+
 
 @dp.message()
 async def handle_unknown(message: Message):
-    """Обработка неизвестных сообщений."""
     user_id = message.from_user.id
     user_data = await get_user_data(user_id)
-    
+
     if user_data:
         await message.answer(
             "Используйте кнопки меню для навигации.",
@@ -445,21 +501,22 @@ async def handle_unknown(message: Message):
             "Отправьте /start для начала работы."
         )
 
+
 # === ЗАПУСК БОТА ===
 async def main():
     logger.info("🤖 Бот запущен и готов к работе!")
     logger.info("📁 База данных: users.db")
-    logger.info("👥 Поддерживается несколько пользователей одновременно")
     logger.info("📊 Доступные команды:")
     logger.info("   📊 Отчет за сегодня")
     logger.info("   📈 Отчет за неделю")
+    logger.info("   👨‍🍳 Сотрудники")
     logger.info("   🔄 Сменить аккаунт")
-    
+
     await dp.start_polling(bot, polling_timeout=20)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
 
 
     #prod by D.Pankratov and M.Buanov
-    
